@@ -122,10 +122,18 @@ def identificar_muertes(capitulos):
     import spacy
     nlp = spacy.load("es_core_news_sm")
     nlp.max_length = 1_500_000
-    verbos_muerte = {"morir", "fallecer", "perecer", "expirar", "desaparecer", "desvanecerse", "asesinar", "ejecutar", "matar", "suicidar", "ahorcar", "envenenar", "fusilar", "ahogar", "aplastar", "degollar", "decapitar", "apunalear", "aplastar", "aniquilar"}
+    verbos_sujeto = {"morir", "fallecer", "perecer", "expirar", "suicidar", "ahorcar", "envenenar", "ahogar", "aplastar", "degollar", "decapitar", "apunalear", "aniquilar"}
+    verbos_objeto = {"asesinar", "ejecutar", "matar", "desaparecer", "fusilar"}
+    verbos_permisivos = {"dejar", "permitir"}  # quitamos 'impedir'
     sustantivos_muerte = {"muerte", "fallecimiento", "asesinato", "desaparición", "ejecución", "suicidio", "homicidio", "tragedia", "funeral", "cadáver", "cuerpo", "restos"}
     expresiones_indirectas = [
         "se desvaneció de pronto", "no volvió a despertar", "dejó de respirar", "no volvió a ser visto", "no volvió a aparecer", "se apagó su luz", "se fue para siempre", "no regresó jamás", "no volvió a levantarse", "no volvió a moverse"
+    ]
+    patrones_permisivos = [
+        re.compile(r"dejó\s+morir\s+a\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)", re.IGNORECASE),
+        re.compile(r"permitió\s+morir\s+a\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)", re.IGNORECASE),
+        re.compile(r"dejar\s+que\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)\s+murier[ao]", re.IGNORECASE),
+        re.compile(r"permitir\s+que\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)\s+murier[ao]", re.IGNORECASE)
     ]
     muertes_por_capitulo = {}
     personajes_muertos = set()
@@ -136,37 +144,75 @@ def identificar_muertes(capitulos):
             continue
         doc = nlp(capitulo)
         personajes_cap = set([ent.text for ent in doc.ents if ent.label_ == "PER"])
+        muertes_detectadas = set()
+        # 0. Permisivos explícitos por regex
+        for patron in patrones_permisivos:
+            for match in patron.finditer(capitulo):
+                nombre = match.group(1).strip()
+                if nombre in personajes_cap and nombre not in personajes_muertos and nombre not in muertes_detectadas:
+                    muertes_por_capitulo[num_capitulo].append(nombre)
+                    personajes_muertos.add(nombre)
+                    muertes_detectadas.add(nombre)
         for sent in doc.sents:
             sent_text = sent.text.lower()
-            # 1. Verbo de muerte con personaje como sujeto
+            # 1. Verbo de muerte con personaje como sujeto (solo si está en pasado)
             for token in sent:
-                if token.lemma_ in verbos_muerte and token.pos_ == "VERB":
-                    sujeto = [w for w in token.lefts if w.dep_ in ("nsubj", "nsubj:pass")]
-                    for s in sujeto:
-                        nombre = s.text.strip()
-                        if nombre in personajes_cap and nombre not in personajes_muertos:
-                            muertes_por_capitulo[num_capitulo].append(nombre)
-                            personajes_muertos.add(nombre)
-            # 2. Sustantivo de muerte con personaje como complemento
+                if token.lemma_ in verbos_sujeto and token.pos_ == "VERB":
+                    tiempo = token.morph.get("Tense")
+                    if "Past" in tiempo or "Pqp" in tiempo or "Imp" in tiempo:
+                        sujeto = [w for w in token.lefts if w.dep_ in ("nsubj", "nsubj:pass")]
+                        for s in sujeto:
+                            nombre = s.text.strip()
+                            if nombre in personajes_cap and nombre not in personajes_muertos and nombre not in muertes_detectadas:
+                                muertes_por_capitulo[num_capitulo].append(nombre)
+                                personajes_muertos.add(nombre)
+                                muertes_detectadas.add(nombre)
+            # 2. Verbo de muerte con personaje como objeto directo (solo si está en pasado)
+            for token in sent:
+                if token.lemma_ in verbos_objeto and token.pos_ == "VERB":
+                    tiempo = token.morph.get("Tense")
+                    if "Past" in tiempo or "Pqp" in tiempo or "Imp" in tiempo:
+                        for child in token.children:
+                            if child.dep_ in ("obj", "iobj", "obl"):
+                                nombre = child.text.strip()
+                                if nombre in personajes_cap and nombre not in personajes_muertos and nombre not in muertes_detectadas:
+                                    muertes_por_capitulo[num_capitulo].append(nombre)
+                                    personajes_muertos.add(nombre)
+                                    muertes_detectadas.add(nombre)
+            # 3. Permisivos: dejó/permitió morir a X (sintáctico)
+            for token in sent:
+                if token.lemma_ in verbos_permisivos and token.pos_ == "VERB":
+                    for child in token.children:
+                        if child.dep_ in ("obj", "iobj", "obl"):
+                            nombre = child.text.strip()
+                            for sub in child.subtree:
+                                if sub.lemma_ in verbos_sujeto and sub.pos_ == "VERB":
+                                    tiempo = sub.morph.get("Tense")
+                                    if "Past" in tiempo or "Pqp" in tiempo or "Imp" in tiempo:
+                                        if nombre in personajes_cap and nombre not in personajes_muertos and nombre not in muertes_detectadas:
+                                            muertes_por_capitulo[num_capitulo].append(nombre)
+                                            personajes_muertos.add(nombre)
+                                            muertes_detectadas.add(nombre)
+            # 4. Sustantivo de muerte con personaje como complemento
             for token in sent:
                 if token.lemma_ in sustantivos_muerte and token.pos_ == "NOUN":
-                    # Buscar complemento directo o posesivo
                     for child in token.children:
                         if child.dep_ in ("obj", "nmod", "poss"):
                             nombre = child.text.strip()
-                            if nombre in personajes_cap and nombre not in personajes_muertos:
+                            if nombre in personajes_cap and nombre not in personajes_muertos and nombre not in muertes_detectadas:
                                 muertes_por_capitulo[num_capitulo].append(nombre)
                                 personajes_muertos.add(nombre)
-            # 3. Expresiones indirectas
+                                muertes_detectadas.add(nombre)
+            # 5. Expresiones indirectas (solo si el sujeto es personaje)
             for expr in expresiones_indirectas:
                 if expr in sent_text:
-                    # Buscar sujeto de la oración
                     for token in sent:
                         if token.dep_ in ("nsubj", "nsubj:pass"):
                             nombre = token.text.strip()
-                            if nombre in personajes_cap and nombre not in personajes_muertos:
+                            if nombre in personajes_cap and nombre not in personajes_muertos and nombre not in muertes_detectadas:
                                 muertes_por_capitulo[num_capitulo].append(nombre)
                                 personajes_muertos.add(nombre)
+                                muertes_detectadas.add(nombre)
         muertes_por_capitulo[num_capitulo] = list(set(muertes_por_capitulo[num_capitulo]))
     muertes_por_capitulo = {k: v for k, v in muertes_por_capitulo.items() if v}
     return muertes_por_capitulo
@@ -187,12 +233,12 @@ def graficar_tendencia(datos, tipo, libros=None):
     """
     Genera figuras matplotlib para visualización según el tipo de análisis
     
-    Argumentos:
+    Args:
         datos: Resultados del análisis
         tipo: 'gramatical', 'personajes' o 'ambos'
         libros: Nombres de los libros
         
-    Return:
+    Returns:
         tuple: (fig_gram, fig_pers) o figura individual según el tipo
     """
     fig_gram = None
